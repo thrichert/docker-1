@@ -1,0 +1,7 @@
+docker run \
+--name lair \
+--link spawning-pool:mysql \
+--restart on-failure \
+-p 8080:80 \
+-d \
+wordpress

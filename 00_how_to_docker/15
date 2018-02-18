@@ -1,0 +1,7 @@
+docker run \
+--name roach-warden \
+--link spawning-pool:db \
+--restart on-failure \
+-p 8081:80 \
+-d \
+phpmyadmin/phpmyadmin
