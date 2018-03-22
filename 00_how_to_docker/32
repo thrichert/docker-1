@@ -1,1 +1,1 @@
-docker kill  && docker rm 
+docker kill $(docker container ls -a -q) || true && docker rm $(docker container ls -a -q) || true
