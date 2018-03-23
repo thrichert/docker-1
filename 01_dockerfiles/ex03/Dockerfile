@@ -43,7 +43,7 @@ RUN			echo git:password | chpasswd --crypt-method=SHA512
 RUN			sudo apt-get install -y postgresql postgresql-client libpq-dev postgresql-contrib &&\
 			sudo -u postgres /etc/init.d/postgresql start && \
 			sudo -u postgres psql -p 5432 -d template1 -c "CREATE USER git CREATEDB PASSWORD 'password';" && \
-			sudo -u postgres psql -p 5432-d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" && \
+			sudo -u postgres psql -p 5432 -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" && \
 			sudo -u postgres psql -p 5432 -d template1 -c "CREATE DATABASE gitlabhq_production OWNER git;"
 
 # install Redis
@@ -58,12 +58,13 @@ RUN 		sudo apt-get install -y redis-server && \
 			sudo service redis-server restart && \
 			sudo usermod -aG redis git
 
+# install GitLab !
 WORKDIR		/home/git
 
 RUN			sudo -u git -H git clone https://gitlab.com/gitlab-org/gitlab-ce.git -b 10-6-stable gitlab
 
 WORKDIR		/home/git/gitlab
-
+# configuration Database
 RUN			sudo -u git -H cp config/gitlab.yml.example config/gitlab.yml &&\
 			sudo -u git -H cp config/secrets.yml.example config/secrets.yml &&\
 			sudo -u git -H chmod 0600 config/secrets.yml && \
@@ -84,49 +85,51 @@ RUN			sudo -u git -H cp config/gitlab.yml.example config/gitlab.yml &&\
 			sudo -u git -H git config --global gc.auto 0 && \
 			sudo -u git -H git config --global repack.writeBitmaps true && \
 			sudo -u git -H git config --global receive.advertisePushOptions true && \
-			sudo -u git -H cp config/resque.yml.example config/resque.yml
+			sudo -u git -H cp config/resque.yml.example config/resque.yml &&\
+			sudo -u git -H cp config/database.yml.postgresql config/database.yml && \
+			sudo -u git -H chmod o-rwx config/database.yml &&\
+			sudo -u git -H sed -i 's/secure password/password/' config/database.yml
 
-RUN			sudo -u git -H cp config/database.yml.postgresql config/database.yml && \
-			sudo -u git -H chmod o-rwx config/database.yml
-RUN			sudo -u git -H sed -i 's/secure password/password/' config/database.yml
+# install Gems
+RUN			sudo -u git -H bundle install --deployment --without development test mysql aws kerberos &&\
+			gem install rails &&\
+			apt-get update && apt-get install -y golang &&\
+			sudo -u git -H bundle exec rake gitlab:shell:install REDIS_URL=unix:/var/run/redis/redis.sock RAILS_ENV=production SKIP_STORAGE_VALIDATION=true
 
-RUN			sudo -u git -H bundle install --deployment --without development test mysql aws kerberos
+# install GitLab-workhorse
+RUN			sudo -u git -H bundle exec rake "gitlab:workhorse:install[/home/git/gitlab-workhorse]" RAILS_ENV=production && \
+			service postgresql restart && service redis-server restart && yes yes | sudo -u git -H bundle exec rake gitlab:setup -q RAILS_ENV=production
 
-RUN			gem install rails
+# init DB and Activate advanced features (Gitaly / logrotate)
+RUN			sudo cp lib/support/init.d/gitlab /etc/init.d/gitlab &&\
+			sudo update-rc.d gitlab defaults 21 &&\
+			sudo -u git -H bundle exec rake "gitlab:gitaly:install[/home/git/gitaly]" RAILS_ENV=production &&\
+			sudo chmod 0700 /home/git/gitlab/tmp/sockets/private && \
+			sudo chown git /home/git/gitlab/tmp/sockets/private &&\
+			sudo cp lib/support/logrotate/gitlab /etc/logrotate.d/gitlab &&\
 
-RUN			apt-get update && apt-get install -y golang
+# Restart and check application status
+RUN service postgresql restart && sudo -u git -H bundle exec rake gitlab:env:info RAILS_ENV=production
 
-RUN 		sudo -u git -H bundle exec rake gitlab:shell:install REDIS_URL=unix:/var/run/redis/redis.sock RAILS_ENV=production SKIP_STORAGE_VALIDATION=true
-
-RUN			sudo -u git -H bundle exec rake "gitlab:workhorse:install[/home/git/gitlab-workhorse]" RAILS_ENV=production
-
-RUN			service postgresql restart && service redis-server restart && yes yes | sudo -u git -H bundle exec rake gitlab:setup -q RAILS_ENV=production
-
-RUN			sudo cp lib/support/init.d/gitlab /etc/init.d/gitlab
-RUN			sudo update-rc.d gitlab defaults 21
-
-RUN			sudo -u git -H bundle exec rake "gitlab:gitaly:install[/home/git/gitaly]" RAILS_ENV=production
-RUN			sudo chmod 0700 /home/git/gitlab/tmp/sockets/private && \
-			sudo chown git /home/git/gitlab/tmp/sockets/private
-RUN 		sudo cp lib/support/logrotate/gitlab /etc/logrotate.d/gitlab
-
-RUN			service postgresql restart && sudo -u git -H bundle exec rake gitlab:env:info RAILS_ENV=production
-
+# Compile Gettext PO files
 RUN			sudo -u git -H bundle exec rake gettext:compile RAILS_ENV=production
-RUN			apt-get update && apt-get install -y nodejs
-RUN			sudo -u git -H yarn install --production --pure-lockfile
-RUN			sudo -u git -H bundle exec rake gitlab:assets:compile RAILS_ENV=production NODE_ENV=production
-RUN			service postgresql restart && service redis-server restart && sudo service gitlab start
-RUN			apt-get update && apt-get install -y nginx-full
-RUN			rm /etc/nginx/sites-enabled/default
-RUN			sudo cp lib/support/nginx/gitlab /etc/nginx/sites-available/gitlab && \
-			sudo ln -s /etc/nginx/sites-available/gitlab /etc/nginx/sites-enabled/gitlab
-RUN			sudo sed -i 's/YOUR_SERVER_FQDN/gitlab.trichert.com/' /etc/nginx/sites-available/gitlab
-RUN			sed -i -e '30,62d' /etc/nginx/sites-available/gitlab
-RUN 		sed -i '51s+gitlab_access;+;+' /etc/nginx/sites-available/gitlab
-RUN																																																																														sudo nginx -t
 
-RUN sed -i '582s/# ssh_port: 22/ssh_port: 30022/' /home/git/gitlab/config/gitlab.yml && \
+# Compule Assets
+RUN			sudo -u git -H yarn install --production --pure-lockfile &&\
+			sudo -u git -H bundle exec rake gitlab:assets:compile RAILS_ENV=production NODE_ENV=production
+# start Gitlab instance
+RUN			service postgresql restart && service redis-server restart && sudo service gitlab start
+
+# Install Nginx && configuration (+ ssh)
+RUN			apt-get update && apt-get install -y nginx-full &&\
+			rm /etc/nginx/sites-enabled/default &7\
+			sudo cp lib/support/nginx/gitlab /etc/nginx/sites-available/gitlab && \
+			sudo ln -s /etc/nginx/sites-available/gitlab /etc/nginx/sites-enabled/gitlab &&\
+			sudo sed -i 's/YOUR_SERVER_FQDN/gitlab.trichert.com/' /etc/nginx/sites-available/gitlab &&\
+			sed -i -e '30,62d' /etc/nginx/sites-available/gitlab &&\
+			sed -i '51s+gitlab_access;+;+' /etc/nginx/sites-available/gitlab &&\
+			sudo nginx -t &&\
+			sed -i '582s/# ssh_port: 22/ssh_port: 30022/' /home/git/gitlab/config/gitlab.yml && \
 		    mkdir /run/sshd
 
 ADD config /home/git/.ssh/
