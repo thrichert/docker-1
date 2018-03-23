@@ -1,22 +1,23 @@
-FROM ruby:2.3
+FROM	debian
 
-LABEL maintainer="trichert <trichert@student.42.fr>"
-LABEL name=ft_rails
+MAINTAINER trichert <trichert@student.42.fr>
 
-RUN useradd -m ruby
+COPY 	. /opt/app/
+WORKDIR	/opt/app/hello
 
-RUN apt-get update &&\
-	apt-get upgrade &&\
-	apt-get install -y --no-install-recommends \
-			postgresql-client &&\
+RUN 	apt-get update && apt-get install -y \
+		libpq-dev \
+		nodejs \
+		build-essential \
+		patch \
+		zlib1g-dev \
+		liblzma-dev \
+		ruby \
+		ruby-dev  && \
+		gem install rails
 
+RUN		apt-get update && apt-get install -y \
+		libsqlite3-dev && \
+		bundle update
 
-ONBUILD COPY . /opt/app
-
-ONBUILD WORKDIR /opt/app
-
-ONBUILD RUN bundle install
-ONBUILD RUN rails db:migrate
-ONBUILD RUN rails db:seed
-
-
+EXPOSE 	3000
